@@ -1,0 +1,81 @@
+# Copyright (c) 2017 Joshua Cooke Barnes
+# Distributed under the terms of the BSD-3-Clause License
+#     https://opensource.org/licenses/BSD-3-Clause
+"""
+Provides IPython core's script magics (like %%bash) to metakernel kernels.
+This is achieved by wrapping the IPython.core.magics.script versions in a
+metakernel.magic.Magic subclass which can provides the correct magically-named
+methods, help methods and other stuff required by metakernel but not provided
+by the core implementations.
+"""
+
+import inspect
+
+from metakernel.magic import _trim
+from metakernel.magic import Magic as MetaKernelMagic
+
+
+def _create_named_magic_method(mtype, name, ipy_magic_func):
+    """
+    Return an (unbound) method implementing ipy_magic_func.
+    As a metakernel-based magic of appropriate magic-type (line or cell).
+    """
+    if mtype == 'line':
+        def line_magic_method(self, *args, **kwargs):
+            command = " ".join(args)
+            ipy_magic_func(command, cell='')
+        magic_method = line_magic_method
+    else:
+        def cell_magic_method(self, *args, **kwargs):
+            self.evaluate = False  # kernel should not evaluate rest of cell
+            ipy_magic_func('', cell=self.code)
+        magic_method = cell_magic_method
+
+    magic_method.__doc__ = ipy_magic_func.__doc__
+    magic_method._ipy_magic_func = ipy_magic_func
+    return magic_method
+
+
+def wrap_ipython_magics_class_or_instance(ipy_magics_class_or_instance):
+    """
+    Return a metakernel.Magic subclass wrapping an IPython Magics class.
+    Magic discovery is different in the two cases, so this wrapper class
+    bridges the gap between the two, allowing basic Ipython.core.magics classes
+    to work with metakernel.
+    """
+    # Make sure we're dealing with an instance, so that we don't later have
+    # problems with unbound methods. If you need a non-default constructor, you
+    # probably need to do more work adapting the ipython magics class than just
+    # wrapping it like this, but you *can* instantiate it yourself.
+    if isinstance(ipy_magics_class_or_instance, type):
+        ipy_magics_class_instance = ipy_magics_class_or_instance()
+    else:
+        ipy_magics_class_instance = ipy_magics_class_or_instance
+
+    class MetaKernelMagicWrapper(MetaKernelMagic):
+        def get_help(self, mtype, name, level=0):
+            if level != 0 and hasattr(self, mtype + '_' + name):
+                func = getattr(self, mtype + '_' + name)
+                try:
+                    return _trim(inspect.getsource(func._ipy_magic_func))
+                except IOError:
+                    return "No help available for magic '{}' for {}s.".format(
+                        name, mtype)
+            else:
+                return super(MetaKernelMagicWrapper, self).get_help(
+                    mtype, name, level=level)
+
+    for mtype, magics in ipy_magics_class_instance.magics.items():
+        for name, ipy_magic in magics.items():
+            magic_method = _create_named_magic_method(mtype, name, ipy_magic)
+            setattr(
+                MetaKernelMagicWrapper, mtype + '_' + name, magic_method)
+
+    return MetaKernelMagicWrapper
+
+
+def register_magics(kernel):
+    """Magically-named func for metakernel magic-registration."""
+    from IPython.core.magics.script import ScriptMagics
+    kernel.register_magics(
+        wrap_ipython_magics_class_or_instance(ScriptMagics))
